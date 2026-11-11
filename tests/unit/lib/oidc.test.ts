@@ -384,6 +384,7 @@ describe("getOIDCConfig", () => {
     process.env.OIDC_ROLE_CLAIM = "";
     process.env.OIDC_ADMIN_ROLES = "";
     process.env.OIDC_USER_ROLES = "";
+    delete process.env.OIDC_ALLOWED_EMAIL_DOMAINS;
     delete process.env.OIDC_PROMPT;
   });
 
@@ -391,6 +392,7 @@ describe("getOIDCConfig", () => {
     Object.assign(process.env, originalEnv);
     if (originalEnv.OIDC_PROMPT === undefined) delete process.env.OIDC_PROMPT;
     if (originalEnv.OIDC_USER_ROLES === undefined) delete process.env.OIDC_USER_ROLES;
+    if (originalEnv.OIDC_ALLOWED_EMAIL_DOMAINS === undefined) delete process.env.OIDC_ALLOWED_EMAIL_DOMAINS;
   });
 
   test("returns config with all required fields", () => {
@@ -463,6 +465,17 @@ describe("getOIDCConfig", () => {
   test("a user role list of only commas and spaces counts as unset", () => {
     process.env.OIDC_USER_ROLES = " , ,";
     expect(getOIDCConfig().userRoles).toEqual([]);
+  });
+
+  test("parses allowed email domains from a comma list, lowercased and without a leading @", () => {
+    process.env.OIDC_ALLOWED_EMAIL_DOMAINS = " Topvisor.com ,@thundo.com, ,";
+    expect(getOIDCConfig().allowedEmailDomains).toEqual(["topvisor.com", "thundo.com"]);
+  });
+
+  test("defaults allowed email domains to an empty list, which admits every domain", () => {
+    expect(getOIDCConfig().allowedEmailDomains).toEqual([]);
+    process.env.OIDC_ALLOWED_EMAIL_DOMAINS = " , ,";
+    expect(getOIDCConfig().allowedEmailDomains).toEqual([]);
   });
 
   test("throws when OIDC_ISSUER is missing", () => {
@@ -813,6 +826,7 @@ describe("discoverProvider", () => {
       roleClaim: "",
       adminRoles: ["admin"],
       userRoles: [],
+      allowedEmailDomains: [],
       prompt: "login" as const,
     };
 

@@ -22,7 +22,7 @@ import {
   readRoleClaimValues,
   getPublicOrigin,
 } from "@/lib/oidc";
-import { oidcUsername } from "@/lib/oidc-identity";
+import { isEmailDomainAllowed, oidcUsername } from "@/lib/oidc-identity";
 import { logger } from "@/lib/logger";
 import { clientAddress } from "@/lib/api/client-address";
 import { emitAuditEvent, type AuditReason } from "@/lib/audit";
@@ -124,6 +124,15 @@ export async function GET(request: Request) {
     }
 
     const identity = oidcUsername(claims as Record<string, unknown>) ?? claims.sub;
+
+    // OIDC_ALLOWED_EMAIL_DOMAINS narrows admission before any role is read: the provider authenticated the account, but
+    // this server takes only accounts whose token speaks for a domain it lists. An empty list admits every account, so
+    // a deployment that leaves the variable unset signs in exactly as before.
+    if (!isEmailDomainAllowed(claims as Record<string, unknown>, oidcConfig.allowedEmailDomains)) {
+      cookieStore.delete(cookieDeletion(stateScope));
+      auditFailure("oidc_domain_not_allowed", ip, String(identity));
+      return NextResponse.redirect(`${origin}${withBasePath("/login")}?error=oidc_domain_not_allowed`);
+    }
 
     // With the Kubernetes access review on (docs/SEED_CONNECTIONS.md), the ID token's groups are what every review of
     // this subject asserts, so a claim the store cannot hold refuses the sign-in, and the role claim is not read at

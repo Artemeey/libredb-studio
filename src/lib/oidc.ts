@@ -27,6 +27,12 @@ export interface OIDCConfig {
    * match an admin or a user role, and any other is refused at sign-in.
    */
   userRoles: string[];
+  /**
+   * OIDC_ALLOWED_EMAIL_DOMAINS. Empty (the default): every account the provider authenticates is admitted, as before
+   * the variable existed. Non-empty: the token must speak for one of these domains (its `hd`, else the domain of a
+   * verified `email`), and an account from any other domain is refused at sign-in.
+   */
+  allowedEmailDomains: string[];
   prompt: OIDCPrompt;
 }
 
@@ -98,6 +104,12 @@ export function getOIDCConfig(): OIDCConfig {
     .map((r) => r.trim())
     .filter(Boolean);
 
+  // A leading @ is stripped so an operator pasting "@example.com" is not locked out by a list that can never match.
+  const allowedEmailDomains = (process.env.OIDC_ALLOWED_EMAIL_DOMAINS || "")
+    .split(",")
+    .map((domain) => domain.trim().toLowerCase().replace(/^@/, ""))
+    .filter(Boolean);
+
   // User roles are read from the role claim, so without one every account would be refused, one sign-in at a time, as
   // oidc_no_role. Named once as configuration instead, which the login route reports as oidc_config.
   if (userRoles.length > 0 && !roleClaim) {
@@ -120,6 +132,7 @@ export function getOIDCConfig(): OIDCConfig {
       .map((r) => r.trim())
       .filter(Boolean),
     userRoles,
+    allowedEmailDomains,
     prompt: readOIDCPrompt(),
   };
 }

@@ -41,3 +41,33 @@ export function oidcUsername(claims: Record<string, unknown>): string | null {
   const name = nonEmptyString(claims.preferred_username);
   return name !== null && !name.includes("@") ? name : null;
 }
+
+/**
+ * The domain an ID token speaks for, lowercased: the `hd` claim Google Workspace puts the account's hosted domain in,
+ * else the domain of an `email` the provider does not mark unverified. Null when the token carries neither, so an
+ * allowlist refuses it instead of guessing.
+ */
+export function emailDomainOf(claims: Record<string, unknown>): string | null {
+  const hosted = nonEmptyString(claims.hd)?.trim().toLowerCase();
+  if (hosted) return hosted;
+  const email = nonEmptyString(claims.email);
+  if (email === null || emailMarkedUnverified(claims.email_verified)) return null;
+  const at = email.lastIndexOf("@");
+  if (at === -1) return null;
+  const domain = email
+    .slice(at + 1)
+    .trim()
+    .toLowerCase();
+  return domain || null;
+}
+
+/**
+ * Whether OIDC_ALLOWED_EMAIL_DOMAINS admits this token's account. An empty list is the default and admits every account
+ * the provider authenticated, exactly as before the variable existed; a set one admits only the domains it names, so an
+ * account from any other domain, or one whose token names no domain at all, is refused.
+ */
+export function isEmailDomainAllowed(claims: Record<string, unknown>, allowedDomains: readonly string[]): boolean {
+  if (allowedDomains.length === 0) return true;
+  const domain = emailDomainOf(claims);
+  return domain !== null && allowedDomains.includes(domain);
+}

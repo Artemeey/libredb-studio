@@ -15,7 +15,8 @@ const mockDecryptState = mock(
 /** OIDC_ISSUER, which openid-client has already matched with the `iss` of every ID token it hands over. */
 const ISSUER = "https://example.auth0.com";
 
-const mockGetOIDCConfig = mock(() => ({
+/** Every field getOIDCConfig() returns, so a test that overrides the config states only what it changes. */
+const oidcConfig = {
   issuer: ISSUER,
   clientId: "test-client-id",
   clientSecret: "test-client-secret",
@@ -23,8 +24,11 @@ const mockGetOIDCConfig = mock(() => ({
   roleClaim: "roles",
   rolePrefix: undefined as string | undefined,
   adminRoles: ["admin"],
-  userRoles: ["user"],
-}));
+  userRoles: ["user"] as string[],
+  allowedEmailDomains: [] as string[],
+};
+
+const mockGetOIDCConfig = mock(() => ({ ...oidcConfig }));
 
 const mockDiscoverProvider = mock(async () => "mock-config");
 
@@ -441,16 +445,7 @@ describe("GET /api/auth/oidc/callback", () => {
     await withBasePathEnv("/tools/libredb", async () => {
       mockCookieGet.mockReturnValue({ value: "encrypted-state-cookie" });
       mockDecryptState.mockResolvedValue({ code_verifier: "v", state: "s", nonce: "n" });
-      mockGetOIDCConfig.mockImplementation(() => ({
-        issuer: "https://example.auth0.com",
-        clientId: "id",
-        clientSecret: "secret",
-        scope: "openid",
-        roleClaim: "roles",
-        rolePrefix: undefined,
-        adminRoles: ["admin"],
-        userRoles: ["user"],
-      }));
+      mockGetOIDCConfig.mockImplementation(() => ({ ...oidcConfig }));
       mockExchangeCode.mockResolvedValue(exchanged({ ...defaultClaims }));
       mockExchangeCode.mockClear();
       mockMapOIDCRole.mockReturnValue("user");
@@ -667,20 +662,68 @@ describe("GET /api/auth/oidc/callback", () => {
     });
   });
 
+  describe("allowed email domains (OIDC_ALLOWED_EMAIL_DOMAINS)", () => {
+    const callbackUrl = "http://localhost:3000/api/auth/oidc/callback?code=auth-code&state=test-state";
+
+    /** The shared config with an allowlist; the mock's own default admits every domain, as an unset list does. */
+    const withAllowedDomains = (allowedEmailDomains: string[]) =>
+      mockGetOIDCConfig.mockReturnValueOnce({ ...oidcConfig, roleClaim: "email", userRoles: [], allowedEmailDomains });
+
+    test("reads the hosted domain from hd, so a Workspace account is admitted by it", async () => {
+      withAllowedDomains(["topvisor.com"]);
+      mockExchangeCode.mockImplementationOnce(async () =>
+        exchanged({ ...defaultClaims, email: "ada@gmail.com", hd: "topvisor.com" }),
+      );
+
+      const res = await GET(new Request(callbackUrl));
+
+      expect(res.headers.get("location")).toBe("http://localhost:3000/");
+      expect(await mintedSession()).toMatchObject({ username: "ada@gmail.com" });
+    });
+
+    test("refuses an account outside the list, with no session and an audit record naming it", async () => {
+      withAllowedDomains(["topvisor.com"]);
+      mockExchangeCode.mockImplementationOnce(async () => exchanged({ ...defaultClaims, email: "someone@gmail.com" }));
+      const spy = spyOn(console, "log").mockImplementation(() => {});
+      try {
+        const res = await GET(new Request(callbackUrl));
+
+        expect(res.status).toBe(307);
+        expect(res.headers.get("location")).toBe("http://localhost:3000/login?error=oidc_domain_not_allowed");
+        // The refusal happens before any session, and before any role is read.
+        expect(setCookies.has("auth-token")).toBe(false);
+        expect(mockMapOIDCRole).not.toHaveBeenCalled();
+        // The exchange used the state up, so its cookie goes as it does after a sign-in.
+        expect(mockCookieStore.delete).toHaveBeenCalledWith({ name: "oidc-state", path: "/" });
+
+        const line = JSON.parse(spy.mock.calls[0]?.[0] as string) as Record<string, unknown>;
+        expect(line).toMatchObject({
+          event: "login_failure",
+          reason: "oidc_domain_not_allowed",
+          // The provider authenticated the account, so the refusal names it, as a sign-in would.
+          actor: "someone@gmail.com",
+        });
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    test("refuses a token that names no domain at all once a list is set", async () => {
+      withAllowedDomains(["topvisor.com"]);
+      mockExchangeCode.mockImplementationOnce(async () => exchanged({ iss: ISSUER, sub: "user-123" }));
+
+      const res = await GET(new Request(callbackUrl));
+
+      expect(res.headers.get("location")).toBe("http://localhost:3000/login?error=oidc_domain_not_allowed");
+      expect(setCookies.has("auth-token")).toBe(false);
+    });
+  });
+
   describe("claim roles (OIDC_ROLE_PREFIX)", () => {
     const callbackUrl = "http://localhost:3000/api/auth/oidc/callback?code=auth-code&state=test-state";
 
     test("session with claim roles carries claimRoles when OIDC_ROLE_PREFIX is set", async () => {
-      mockGetOIDCConfig.mockReturnValueOnce({
-        issuer: ISSUER,
-        clientId: "test-client-id",
-        clientSecret: "test-client-secret",
-        scope: "openid profile email",
-        roleClaim: "roles",
-        rolePrefix: "team-",
-        adminRoles: ["admin"],
-        userRoles: ["user"],
-      });
+      mockGetOIDCConfig.mockReturnValueOnce({ ...oidcConfig, rolePrefix: "team-" });
       mockExchangeCode.mockImplementationOnce(async () =>
         exchanged({ ...defaultClaims, roles: ["user", "team-billing", "team-dev"] }),
       );
@@ -692,16 +735,7 @@ describe("GET /api/auth/oidc/callback", () => {
     });
 
     test("feature off gives the old session shape without claimRoles", async () => {
-      mockGetOIDCConfig.mockReturnValueOnce({
-        issuer: ISSUER,
-        clientId: "test-client-id",
-        clientSecret: "test-client-secret",
-        scope: "openid profile email",
-        roleClaim: "roles",
-        rolePrefix: undefined,
-        adminRoles: ["admin"],
-        userRoles: ["user"],
-      });
+      mockGetOIDCConfig.mockReturnValueOnce({ ...oidcConfig, rolePrefix: undefined });
       mockExchangeCode.mockImplementationOnce(async () =>
         exchanged({ ...defaultClaims, roles: ["user", "team-billing"] }),
       );
@@ -713,16 +747,7 @@ describe("GET /api/auth/oidc/callback", () => {
     });
 
     test("oidc_role_overflow refusal and audit when claim roles exceed limits", async () => {
-      mockGetOIDCConfig.mockReturnValueOnce({
-        issuer: ISSUER,
-        clientId: "test-client-id",
-        clientSecret: "test-client-secret",
-        scope: "openid profile email",
-        roleClaim: "roles",
-        rolePrefix: "team-",
-        adminRoles: ["admin"],
-        userRoles: ["user"],
-      });
+      mockGetOIDCConfig.mockReturnValueOnce({ ...oidcConfig, rolePrefix: "team-" });
       // 21 matching roles
       const tooManyRoles = Array.from({ length: 21 }, (_, i) => `team-${i}`);
       mockExchangeCode.mockImplementationOnce(async () =>
@@ -749,16 +774,7 @@ describe("GET /api/auth/oidc/callback", () => {
     });
 
     test("OIDC_USER_ROLES still refuses a claim-roles-only account as oidc_no_role", async () => {
-      mockGetOIDCConfig.mockReturnValueOnce({
-        issuer: ISSUER,
-        clientId: "test-client-id",
-        clientSecret: "test-client-secret",
-        scope: "openid profile email",
-        roleClaim: "roles",
-        rolePrefix: "team-",
-        adminRoles: ["admin"],
-        userRoles: ["user"],
-      });
+      mockGetOIDCConfig.mockReturnValueOnce({ ...oidcConfig, rolePrefix: "team-" });
       mockMapOIDCRole.mockReturnValueOnce(null);
       mockExchangeCode.mockImplementationOnce(async () => exchanged({ ...defaultClaims, roles: ["team-billing"] }));
 
